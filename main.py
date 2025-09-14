@@ -21,8 +21,9 @@ import imaplib
 from fastapi.middleware.cors import CORSMiddleware
 from itertools import groupby
 
-# 导入配置模块
+# 导入配置模块和数据库模块
 from config import verify_admin_password, get_config_info
+from database import db  # 新增数据库导入
 
 
 
@@ -195,138 +196,132 @@ def extract_email_content(email_message: email.message.EmailMessage) -> tuple[st
 
 
 # ============================================================================
-# 凭证管理模块
+# 凭证管理模块 (MySQL版本)
 # ============================================================================
 
 async def get_account_credentials(email_id: str) -> AccountCredentials:
-    """从accounts.json获取账户凭证"""
+    """从MySQL数据库获取账户凭证"""
     try:
-        if not Path(ACCOUNTS_FILE).exists():
+        query = "SELECT email, refresh_token, client_id FROM accounts WHERE email = %s"
+        async with db.get_connection() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cursor:
+                await cursor.execute(query, (email_id,))
+                account_data = await cursor.fetchone()
+        
+        if not account_data:
             raise HTTPException(status_code=404, detail="Account not found")
         
-        with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-            accounts = json.load(f)
-        
-        if email_id not in accounts:
-            raise HTTPException(status_code=404, detail="Account not found")
-        
-        account_data = accounts[email_id]
         return AccountCredentials(
-            email=email_id,
+            email=account_data['email'],
             refresh_token=account_data['refresh_token'],
             client_id=account_data['client_id']
         )
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Failed to read accounts file")
     except Exception as e:
         logger.error(f"Error getting account credentials: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 async def get_all_accounts() -> Dict[str, Dict[str, str]]:
-    """获取所有账户信息（优化IO）"""
+    """获取所有账户信息（MySQL版本）"""
     try:
-        if not Path(ACCOUNTS_FILE).exists():
-            return {}
+        query = "SELECT email, refresh_token, client_id FROM accounts"
+        async with db.get_connection() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cursor:
+                await cursor.execute(query)
+                accounts_data = await cursor.fetchall()
         
-        # 使用线程池执行文件读取
-        return await asyncio.to_thread(_read_accounts_sync)
+        # 转换为与原来相同的格式
+        accounts = {}
+        for account in accounts_data:
+            accounts[account['email']] = {
+                'refresh_token': account['refresh_token'],
+                'client_id': account['client_id']
+            }
+        
+        return accounts
     except Exception as e:
         logger.error(f"Error getting all accounts: {e}")
         return {}
 
-def _read_accounts_sync() -> Dict[str, Dict[str, str]]:
-    """同步读取函数"""
-    try:
-        with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except json.JSONDecodeError:
-        logger.error("Failed to decode accounts file")
-        return {}
-
 
 async def save_multiple_accounts_batch(credentials_list: List[AccountCredentials]) -> None:
-    """批量保存多个账户凭证（优化版本）"""
+    """批量保存多个账户凭证（MySQL版本）"""
     try:
-        await asyncio.to_thread(_save_multiple_accounts_sync, credentials_list)
-        logger.info(f"Batch saved {len(credentials_list)} accounts")
+        # 使用事务批量插入或更新
+        async with db.get_connection() as conn:
+            async with conn.cursor() as cursor:
+                # 开始事务
+                await conn.begin()
+                
+                for credentials in credentials_list:
+                    query = """
+                    INSERT INTO accounts (email, refresh_token, client_id) 
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE 
+                        refresh_token = VALUES(refresh_token),
+                        client_id = VALUES(client_id),
+                        updated_at = CURRENT_TIMESTAMP
+                    """
+                    await cursor.execute(query, (
+                        credentials.email,
+                        credentials.refresh_token,
+                        credentials.client_id
+                    ))
+                
+                # 提交事务
+                await conn.commit()
+        
+        logger.info(f"Batch saved {len(credentials_list)} accounts to MySQL")
     except Exception as e:
         logger.error(f"Error batch saving accounts: {e}")
         raise HTTPException(status_code=500, detail="Failed to batch save accounts")
 
-def _save_multiple_accounts_sync(credentials_list: List[AccountCredentials]):
-    """同步批量保存函数"""
-    # 读取现有账户
-    accounts = {}
-    if Path(ACCOUNTS_FILE).exists():
-        with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-            accounts = json.load(f)
-    
-    # 批量更新账户信息
-    for credentials in credentials_list:
-        accounts[credentials.email] = {
-            'refresh_token': credentials.refresh_token,
-            'client_id': credentials.client_id
-        }
-    
-    # 直接写入文件（用户要求移除原子写入）
-    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(accounts, f, indent=2, ensure_ascii=False)
-
 async def save_account_credentials(email_id: str, credentials: AccountCredentials) -> None:
-    """保存账户凭证到accounts.json（优化IO操作）"""
+    """保存账户凭证到MySQL数据库"""
     try:
-        # 使用线程池执行文件IO操作
-        await asyncio.to_thread(_save_account_sync, email_id, credentials)
-        logger.info(f"Account credentials saved for {email_id}")
+        query = """
+        INSERT INTO accounts (email, refresh_token, client_id) 
+        VALUES (%s, %s, %s)
+        ON DUPLICATE KEY UPDATE 
+            refresh_token = VALUES(refresh_token),
+            client_id = VALUES(client_id),
+            updated_at = CURRENT_TIMESTAMP
+        """
+        
+        async with db.get_connection() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(query, (
+                    email_id,
+                    credentials.refresh_token,
+                    credentials.client_id
+                ))
+        
+        logger.info(f"Account credentials saved for {email_id} in MySQL")
     except Exception as e:
         logger.error(f"Error saving account credentials: {e}")
         raise HTTPException(status_code=500, detail="Failed to save account")
 
-def _save_account_sync(email_id: str, credentials: AccountCredentials):
-    """同步保存函数"""
-    accounts = {}
-    if Path(ACCOUNTS_FILE).exists():
-        with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-            accounts = json.load(f)
-    
-    accounts[email_id] = {
-        'refresh_token': credentials.refresh_token,
-        'client_id': credentials.client_id
-    }
-    
-    # 直接写入文件（用户要求移除原子写入）
-    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(accounts, f, indent=2, ensure_ascii=False)
-
 
 async def delete_accounts(emails: List[str]) -> Dict[str, int]:
-    """从accounts.json中删除指定的账户"""
+    """从MySQL数据库中删除指定的账户"""
     try:
-        if not Path(ACCOUNTS_FILE).exists():
-            return {"deleted": 0, "not_found": len(emails)}
+        if not emails:
+            return {"deleted": 0, "not_found": 0}
         
-        with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-            accounts = json.load(f)
+        # 构建参数化查询
+        placeholders = ','.join(['%s'] * len(emails))
+        query = f"DELETE FROM accounts WHERE email IN ({placeholders})"
         
-        deleted = 0
-        not_found = 0
+        async with db.get_connection() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(query, emails)
+                deleted_count = cursor.rowcount
         
-        for email in emails:
-            if email in accounts:
-                del accounts[email]
-                deleted += 1
-            else:
-                not_found += 1
-        
-        with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(accounts, f, indent=2, ensure_ascii=False)
-        
-        logger.info(f"Deleted {deleted} accounts, {not_found} not found")
-        return {"deleted": deleted, "not_found": not_found}
-    except json.JSONDecodeError:
-        logger.error("Failed to decode accounts file")
-        raise HTTPException(status_code=500, detail="Failed to read accounts file")
+        logger.info(f"Deleted {deleted_count} accounts from MySQL")
+        return {
+            "deleted": deleted_count,
+            "not_found": len(emails) - deleted_count
+        }
     except Exception as e:
         logger.error(f"Error deleting accounts: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete accounts")
@@ -1088,6 +1083,23 @@ async def delete_multiple_accounts(
 # 启动配置
 # ============================================================================
 
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时初始化数据库"""
+    try:
+        await db.connect()
+        await db.initialize_database()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        raise
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时清理资源"""
+    await db.disconnect()
+    logger.info("Database connection closed")
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)
