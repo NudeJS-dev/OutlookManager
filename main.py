@@ -20,6 +20,7 @@ from email.utils import parsedate_to_datetime
 import imaplib
 from fastapi.middleware.cors import CORSMiddleware
 from itertools import groupby
+import aiomysql
 
 # 导入配置模块和数据库模块
 from config import verify_admin_password, get_config_info
