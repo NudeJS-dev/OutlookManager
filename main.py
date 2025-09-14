@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理 - 替代旧的startup/shutdown事件"""
     # 启动时初始化数据库
     try:
+        logger.info("Starting application...")
         await db.connect()
         await db.initialize_database()
         logger.info("Database initialized successfully")
