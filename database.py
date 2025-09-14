@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 class Database:
     def __init__(self):
         self.pool: Optional[aiomysql.Pool] = None
+        self._initialized = False
+        self._init_lock = asyncio.Lock()
 
     async def connect(self):
         """连接到MySQL数据库"""
@@ -60,13 +62,19 @@ class Database:
         if self.pool:
             self.pool.close()
             await self.pool.wait_closed()
+            self.pool = None
             logger.info("MySQL connection pool closed")
 
     @asynccontextmanager
     async def get_connection(self):
         """获取数据库连接上下文管理器"""
-        if not self.pool:
-            await self.connect()
+        if not self._initialized:
+            async with self._init_lock:
+                if not self._initialized:
+                    if not self.pool:
+                        await self.connect()
+                    await self.initialize_database()
+                    self._initialized = True
         
         conn = await self.pool.acquire()
         try:
@@ -96,7 +104,7 @@ class Database:
         """
         
         try:
-            async with self.get_connection() as conn:
+            async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(create_table_query)
                     logger.info("Accounts table created or already exists")

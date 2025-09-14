@@ -8,7 +8,6 @@ from typing import Optional, List, Dict, Any, Union
 from pathlib import Path
 import time
 from functools import lru_cache
-from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Depends, status
@@ -26,31 +25,6 @@ import aiomysql
 # 导入配置模块和数据库模块
 from config import verify_admin_password, get_config_info
 from database import db  # 新增数据库导入
-
-
-
-# ============================================================================
-# lifespan事件处理器
-# ============================================================================
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """应用生命周期管理 - 替代旧的startup/shutdown事件"""
-    # 启动时初始化数据库
-    try:
-        logger.info("Starting application...")
-        await db.connect()
-        await db.initialize_database()
-        logger.info("Database initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        raise
-    
-    yield  # 应用运行期间
-    
-    # 关闭时清理资源
-    await db.disconnect()
-    logger.info("Database connection closed")
 
 
 
@@ -726,8 +700,7 @@ async def get_email_details(credentials: AccountCredentials, message_id: str) ->
 app = FastAPI(
     title="Outlook邮件API服务",
     description="基于FastAPI和aioimaplib的异步邮件管理服务",
-    version="1.0.0",
-    lifespan=lifespan  # 使用新的lifespan处理器
+    version="1.0.0"
 )
 
 app.add_middleware(
@@ -1108,8 +1081,25 @@ async def delete_multiple_accounts(
 
 
 # ============================================================================
-# 启动配置 (已弃用，使用lifespan替代)
+# 启动配置
 # ============================================================================
+
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时初始化数据库"""
+    try:
+        await db.connect()
+        await db.initialize_database()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        raise
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时清理资源"""
+    await db.disconnect()
+    logger.info("Database connection closed")
 
 if __name__ == "__main__":
     import uvicorn
